@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database Service
+  db:
+    image: postgres:latest
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: my_user
+      POSTGRES_PASSWORD: my_password
+      POSTGRES_DB: my_database
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Python API Service
+  api:
+    build:
+      context: ./api  # Path to the API's Dockerfile directory
+    container_name: api_service
+    environment:
+      DATABASE_URL: postgresql://my_user:my_password@db:5432/my_database
+    ports:
+      - "5000:5000"
+    depends_on:
+      - db  # Ensures db starts before api
+
+# Named volume for persistent PostgreSQL storage
+volumes:
+  pgdata:
