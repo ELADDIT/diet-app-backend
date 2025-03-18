@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Diet Appointments Dashboard</title>
+</head>
+<body>
+    <h1>Welcome to the Diet Appointments Dashboard</h1>
+    <h2>Scheduled Appointments</h2>
+    <div id="appointments">Loading appointments...</div>
+    <script>
+        // Fetch appointments from the API and display them
+        fetch('/appointments')
+            .then(response => response.json())
+            .then(data => {
+                const container = document.getElementById('appointments');
+                if (data.length === 0) {
+                    container.innerHTML = '<p>No appointments scheduled.</p>';
+                } else {
+                    data.forEach(appointment => {
+                        const apptDiv = document.createElement('div');
+                        apptDiv.innerHTML = `Appointment ID: ${appointment.appointment_id}
+                            - Scheduled At: ${appointment.scheduled_at}
+                            - Status: ${appointment.status}`;
+                        container.appendChild(apptDiv);
+                    });
+                }
+            })
+            .catch(error => {
+                document.getElementById('appointments').innerHTML = 'Error loading appointments.';
+                console.error('Error:', error);
+            });
+    </script>
+</body>
+</html>

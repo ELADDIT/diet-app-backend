@@ -17,14 +17,14 @@ services:
   # Python API Service
   api:
     build:
-      context: ./api  # Path to the API's Dockerfile directory
+      context: ./api
     container_name: api_service
     environment:
       DATABASE_URL: postgresql://my_user:my_password@db:5432/my_database
     ports:
       - "5000:5000"
     depends_on:
-      - db  # Ensures db starts before api
+      - db
 
 # Named volume for persistent PostgreSQL storage
 volumes:
