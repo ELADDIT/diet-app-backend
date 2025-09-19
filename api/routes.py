@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, render_template
 from datetime import datetime
+from werkzeug.security import generate_password_hash
 from database import SessionLocal
 from models import User, UserProgress, DietPlan, WorkoutPlan, Message, Appointment
 
@@ -39,10 +40,20 @@ def get_users():
 def create_user():
     data = request.get_json()
     session = SessionLocal()
+
+    # Support clients sending either a plain password or a precomputed hash
+    raw_password = data.get('password')
+    password_hash = data.get('password_hash')
+    if raw_password is not None:
+        password_hash = generate_password_hash(raw_password)
+    if password_hash is None:
+        session.close()
+        return jsonify({"error": "Password is required"}), 400
+
     new_user = User(
         username=data['username'],
         email=data['email'],
-        password_hash=data['password_hash'],
+        password_hash=password_hash,
         full_name=data.get('full_name'),
         gender=data.get('gender'),
         age=data.get('age'),
