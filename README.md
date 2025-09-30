@@ -23,3 +23,18 @@ This is the backend service for a diet and fitness application i made with a fri
 - Python 3.x installed (for local development)
 
 
+
+## Running Tests
+
+1. Install application dependencies:
+   ```bash
+   pip install -r api/requirements.txt
+   ```
+2. Install test dependencies:
+   ```bash
+   pip install -r requirements-dev.txt
+   ```
+3. Run the automated test suite:
+   ```bash
+   pytest
+   ```
