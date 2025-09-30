@@ -1,6 +1,8 @@
 import time
 from datetime import datetime, timedelta
 
+from werkzeug.security import generate_password_hash
+
 try:  # pragma: no cover - exercised when requests is available
     import requests  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - offline fallback
@@ -81,6 +83,22 @@ def test_user_creation_requires_password(base_url):
     assert response.json()["error"] == "Password is required"
 
 
+def test_user_creation_accepts_prehashed_password(base_url):
+    hashed_password = generate_password_hash("already_secure")
+    response = requests.post(
+        f"{base_url}/users",
+        json={
+            "username": "prehashed",
+            "email": "prehashed@example.com",
+            "password_hash": hashed_password,
+        },
+    )
+    assert response.status_code == 201
+
+    users = requests.get(f"{base_url}/users").json()
+    assert users[0]["username"] == "prehashed"
+
+
 def test_diet_plan_creation_and_retrieval(base_url):
     user_id = create_user(base_url, "dietuser", "diet@example.com")
 
@@ -111,6 +129,21 @@ def test_diet_plan_creation_and_retrieval(base_url):
     assert plan["preferences_client_notes"] == "No peanuts"
     assert plan["start_date"].startswith(start_date.isoformat())
     assert plan["end_date"].startswith(end_date.isoformat())
+
+
+def test_diet_plan_creation_with_invalid_dates_returns_400(base_url):
+    user_id = create_user(base_url, "dietuser2", "diet2@example.com")
+    response = requests.post(
+        f"{base_url}/users/{user_id}/diet_plans",
+        json={
+            "nutritionist_id": 99,
+            "start_date": "invalid-date",
+            "end_date": "also-invalid",
+            "meal_details": "Details",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid date format. Expected YYYY-MM-DD."
 
 
 def test_message_conversation_flow(base_url):
@@ -186,3 +219,18 @@ def test_appointment_workflow(base_url):
     not_found = requests.get(f"{base_url}/appointments/{appointment_id + 1}")
     assert not_found.status_code == 404
     assert not_found.json()["message"] == "Appointment not found"
+
+
+def test_create_appointment_with_invalid_datetime_returns_400(base_url):
+    client_id = create_user(base_url, "apptclient", "apptclient@example.com")
+    nutritionist_id = create_user(base_url, "apptnut", "apptnut@example.com")
+    response = requests.post(
+        f"{base_url}/appointments",
+        json={
+            "client_id": client_id,
+            "nutritionist_id": nutritionist_id,
+            "scheduled_at": "invalid",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."
