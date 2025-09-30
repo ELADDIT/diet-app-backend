@@ -95,20 +95,28 @@ def get_diet_plans(user_id):
 def create_diet_plan(user_id):
     data = request.get_json()
     session = SessionLocal()
-    new_diet_plan = DietPlan(
-        user_id=user_id,
-        nutritionist_id=data.get('nutritionist_id'),
-        start_date=datetime.strptime(data['start_date'], '%Y-%m-%d'),
-        end_date=datetime.strptime(data['end_date'], '%Y-%m-%d'),
-        meal_details=data['meal_details'],
-        preferences_client_notes=data.get('preferences_client_notes'),
-        notes=data.get('notes')
-    )
-    session.add(new_diet_plan)
-    session.commit()
-    session.refresh(new_diet_plan)
-    session.close()
-    return jsonify({"message": "Diet plan created successfully", "diet_id": new_diet_plan.diet_id}), 201
+    try:
+        try:
+            start_date = datetime.strptime(data['start_date'], '%Y-%m-%d')
+            end_date = datetime.strptime(data['end_date'], '%Y-%m-%d')
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Invalid date format. Expected YYYY-MM-DD."}), 400
+
+        new_diet_plan = DietPlan(
+            user_id=user_id,
+            nutritionist_id=data.get('nutritionist_id'),
+            start_date=start_date,
+            end_date=end_date,
+            meal_details=data['meal_details'],
+            preferences_client_notes=data.get('preferences_client_notes'),
+            notes=data.get('notes')
+        )
+        session.add(new_diet_plan)
+        session.commit()
+        session.refresh(new_diet_plan)
+        return jsonify({"message": "Diet plan created successfully", "diet_id": new_diet_plan.diet_id}), 201
+    finally:
+        session.close()
 
 # --------------------------------
 # Messages Endpoints
@@ -157,18 +165,25 @@ def get_conversation():
 def create_appointment():
     data = request.get_json()
     session = SessionLocal()
-    new_appointment = Appointment(
-        client_id=data['client_id'],
-        nutritionist_id=data['nutritionist_id'],
-        scheduled_at=datetime.strptime(data['scheduled_at'], '%Y-%m-%d %H:%M:%S'),
-        status=data.get('status', 'scheduled'),
-        google_calendar_event_id=data.get('google_calendar_event_id')
-    )
-    session.add(new_appointment)
-    session.commit()
-    session.refresh(new_appointment)
-    session.close()
-    return jsonify({"message": "Appointment created successfully", "appointment_id": new_appointment.appointment_id}), 201
+    try:
+        try:
+            scheduled_at = datetime.strptime(data['scheduled_at'], '%Y-%m-%d %H:%M:%S')
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."}), 400
+
+        new_appointment = Appointment(
+            client_id=data['client_id'],
+            nutritionist_id=data['nutritionist_id'],
+            scheduled_at=scheduled_at,
+            status=data.get('status', 'scheduled'),
+            google_calendar_event_id=data.get('google_calendar_event_id')
+        )
+        session.add(new_appointment)
+        session.commit()
+        session.refresh(new_appointment)
+        return jsonify({"message": "Appointment created successfully", "appointment_id": new_appointment.appointment_id}), 201
+    finally:
+        session.close()
 
 @bp.route('/appointments/<int:appointment_id>', methods=['GET'])
 def get_appointment(appointment_id):
