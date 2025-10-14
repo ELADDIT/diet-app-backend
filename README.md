@@ -23,6 +23,28 @@ This is the backend service for a diet and fitness application i made with a fri
 - Python 3.x installed (for local development)
 
 
+### AI Configuration
+
+The AI powered endpoints rely on environment variables so the service can be configured without
+code changes. Set the following variables in your shell, Docker Compose file, or deployment
+platform before starting the API:
+
+- `AI_API_KEY` – Secret key used to authenticate against the AI provider. Required for any
+  AI-powered endpoints to function.
+- `AI_MODEL_NAME` – Identifier of the model to use (for example `gpt-4o-mini`). Defaults to a
+  lightweight model suitable for testing.
+- `AI_BASE_URL` – Optional base URL for the AI provider if it differs from the default.
+- `AI_PROMPT_TEMPLATE_DIET` – Optional custom template for the diet plan prompt. The template can
+  reference `{user_name}`, `{goal}`, and `{metrics}` placeholders.
+- `AI_PROMPT_TEMPLATE_WORKOUT` – Optional custom template for workout plans with the same
+  placeholders.
+- `AI_PROMPT_TEMPLATE_CHAT` – Optional template for conversational prompts. Placeholders include
+  `{user_name}`, `{history}`, and `{message}`.
+
+When running the automated tests, placeholder values are injected automatically so the suite can
+stub the AI client without reaching an external service.
+
+
 
 ## Running Tests
 
