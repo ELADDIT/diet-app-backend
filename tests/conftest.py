@@ -21,6 +21,8 @@ def app_environment(tmp_path_factory):
 
     db_path = tmp_path_factory.mktemp("db") / "test.sqlite"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
+    os.environ.setdefault("AI_API_KEY", "test-key")
+    os.environ.setdefault("AI_MODEL_NAME", "test-model")
 
     from app import app
     from models import Base

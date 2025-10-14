@@ -1,4 +1,14 @@
-from sqlalchemy import Column, Integer, String, DateTime, DECIMAL, Text, Boolean, ForeignKey, func
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    DateTime,
+    DECIMAL,
+    Text,
+    Boolean,
+    ForeignKey,
+    func,
+)
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -9,6 +19,7 @@ class User(Base):
     username = Column(String(50), unique=True, nullable=False)
     email = Column(String(100), unique=True, nullable=False)
     password_hash = Column(String(200), nullable=False)
+    role = Column(String(20), nullable=False, default='client')
     full_name = Column(String(100))
     gender = Column(String(10))
     age = Column(Integer)
@@ -27,6 +38,8 @@ class User(Base):
     progress = relationship('UserProgress', back_populates='user')
     diet_plans = relationship('DietPlan', back_populates='user')
     workout_plans = relationship('WorkoutPlan', back_populates='user')
+    ai_interactions = relationship('AIInteraction', back_populates='user')
+    subscriptions = relationship('UserSubscription', back_populates='user', cascade='all, delete-orphan')
 
 class UserProgress(Base):
     __tablename__ = 'user_progress'
@@ -87,4 +100,95 @@ class Appointment(Base):
     scheduled_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=func.now())
     status = Column(String(50), default='scheduled')
+    meeting_provider_event_id = Column(String(255))
+    meeting_url = Column(String(255))
+    location = Column(String(255))
+    meeting_type = Column(String(50), default='virtual')
+    max_participants = Column(Integer, default=1)
+    group_session_id = Column(Integer, ForeignKey('group_sessions.group_session_id'))
+
+    client = relationship('User', foreign_keys=[client_id])
+    nutritionist = relationship('User', foreign_keys=[nutritionist_id])
+    group_session = relationship('GroupSession', back_populates='appointments')
+
+
+class GroupSession(Base):
+    __tablename__ = 'group_sessions'
+    group_session_id = Column(Integer, primary_key=True)
+    nutritionist_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    topic = Column(String(100), nullable=False)
+    description = Column(Text)
+    start_time = Column(DateTime, nullable=False)
+    recurrence_rule = Column(String(100))
+    meeting_type = Column(String(50), default='virtual')
+    location = Column(String(255))
+    meeting_url = Column(String(255))
+    max_participants = Column(Integer)
+    meeting_provider_event_id = Column(String(255))
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    nutritionist = relationship('User')
+    appointments = relationship('Appointment', back_populates='group_session')
+
+
+class Subscription(Base):
+    __tablename__ = 'subscriptions'
+    subscription_id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.user_id'), nullable=False, unique=True)
+    plan_name = Column(String(100), nullable=False)
+    monthly_session_quota = Column(Integer, nullable=False)
+    sessions_booked_this_month = Column(Integer, default=0)
+    period_start = Column(DateTime, default=func.now())
+
+    user = relationship('User', back_populates='subscription')
     google_calendar_event_id = Column(String(255))
+
+
+class AIInteraction(Base):
+    __tablename__ = 'ai_interactions'
+    interaction_id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    interaction_type = Column(String(50), nullable=False)
+    prompt = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    context = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+
+    user = relationship('User', back_populates='ai_interactions')
+class SubscriptionPlan(Base):
+    __tablename__ = 'subscription_plans'
+
+    plan_id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    description = Column(Text)
+    price = Column(DECIMAL(8, 2), nullable=False)
+    billing_interval = Column(String(50), nullable=False)
+    one_on_one_session_limit = Column(Integer, default=0)
+    group_session_limit = Column(Integer, default=0)
+    allow_one_on_one = Column(Boolean, default=False)
+    allow_group_sessions = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    subscriptions = relationship('UserSubscription', back_populates='plan', cascade='all, delete-orphan')
+
+
+class UserSubscription(Base):
+    __tablename__ = 'user_subscriptions'
+
+    subscription_id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    plan_id = Column(Integer, ForeignKey('subscription_plans.plan_id'), nullable=False)
+    status = Column(String(50), default='pending', nullable=False)
+    checkout_session_id = Column(String(255), unique=True)
+    external_customer_id = Column(String(255))
+    external_subscription_id = Column(String(255))
+    renewal_date = Column(DateTime)
+    activated_at = Column(DateTime)
+    canceled_at = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    user = relationship('User', back_populates='subscriptions')
+    plan = relationship('SubscriptionPlan', back_populates='subscriptions')
