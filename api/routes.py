@@ -1,8 +1,62 @@
 from flask import Blueprint, request, jsonify, render_template
 from datetime import datetime
 from werkzeug.security import generate_password_hash
+from sqlalchemy.exc import IntegrityError
+
 from database import SessionLocal
-from models import User, UserProgress, DietPlan, WorkoutPlan, Message, Appointment
+from models import (
+    User,
+    UserProgress,
+    DietPlan,
+    WorkoutPlan,
+    Message,
+    Appointment,
+    GroupSession,
+    Subscription,
+)
+from services import meetings
+
+
+class SubscriptionNotFoundError(RuntimeError):
+    pass
+
+
+class QuotaExceededError(RuntimeError):
+    pass
+
+
+def _reset_subscription_period(subscription: Subscription, now: datetime) -> None:
+    if subscription.period_start is None:
+        subscription.period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        subscription.sessions_booked_this_month = 0
+        return
+
+    if (
+        subscription.period_start.year != now.year
+        or subscription.period_start.month != now.month
+    ):
+        subscription.period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        subscription.sessions_booked_this_month = 0
+
+
+def _consume_quota(session, user_id: int, now: datetime) -> Subscription:
+    subscription = session.query(Subscription).filter(Subscription.user_id == user_id).first()
+    if not subscription:
+        raise SubscriptionNotFoundError("Active subscription is required")
+
+    _reset_subscription_period(subscription, now)
+    quota = subscription.monthly_session_quota
+    if quota is not None and subscription.sessions_booked_this_month >= quota:
+        raise QuotaExceededError("Monthly session quota exceeded")
+
+    subscription.sessions_booked_this_month += 1
+    session.flush()
+    return subscription
+
+
+def _release_quota(subscription: Subscription) -> None:
+    if subscription.sessions_booked_this_month > 0:
+        subscription.sessions_booked_this_month -= 1
 
 bp = Blueprint('api', __name__)
 
@@ -70,6 +124,45 @@ def create_user():
     session.refresh(new_user)
     session.close()
     return jsonify({"message": "User created successfully", "user_id": new_user.user_id}), 201
+
+# --------------------------------
+# Subscriptions Endpoints
+# --------------------------------
+@bp.route('/subscriptions', methods=['POST'])
+def create_subscription():
+    data = request.get_json() or {}
+    user_id = data.get('user_id')
+    plan_name = data.get('plan_name')
+    monthly_session_quota = data.get('monthly_session_quota')
+
+    if user_id is None or plan_name is None or monthly_session_quota is None:
+        return jsonify({"error": "user_id, plan_name, and monthly_session_quota are required"}), 400
+
+    try:
+        monthly_session_quota = int(monthly_session_quota)
+    except (TypeError, ValueError):
+        return jsonify({"error": "monthly_session_quota must be an integer"}), 400
+
+    session = SessionLocal()
+    try:
+        subscription = Subscription(
+            user_id=user_id,
+            plan_name=plan_name,
+            monthly_session_quota=monthly_session_quota,
+            period_start=datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0),
+        )
+        session.add(subscription)
+        session.commit()
+        session.refresh(subscription)
+        return jsonify({
+            "message": "Subscription created successfully",
+            "subscription_id": subscription.subscription_id,
+        }), 201
+    except IntegrityError:
+        session.rollback()
+        return jsonify({"error": "Subscription already exists for this user"}), 409
+    finally:
+        session.close()
 
 # --------------------------------
 # Diet Plans Endpoints
@@ -159,6 +252,161 @@ def get_conversation():
     return jsonify(result)
 
 # --------------------------------
+# Group Sessions Endpoints
+# --------------------------------
+@bp.route('/group_sessions', methods=['POST'])
+def create_group_session():
+    data = request.get_json() or {}
+    try:
+        start_time = datetime.strptime(data['start_time'], '%Y-%m-%d %H:%M:%S')
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."}), 400
+
+    nutritionist_id = data.get('nutritionist_id')
+    topic = data.get('topic')
+    if nutritionist_id is None or not topic:
+        return jsonify({"error": "nutritionist_id and topic are required"}), 400
+
+    meeting_type = data.get('meeting_type', 'virtual')
+    location = data.get('location')
+    recurrence_rule = data.get('recurrence_rule')
+    raw_max_participants = data.get('max_participants')
+    try:
+        max_participants = int(raw_max_participants) if raw_max_participants is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_participants must be an integer"}), 400
+
+    session = SessionLocal()
+    try:
+        try:
+            details = meetings.meeting_provider.create_meeting(
+                topic=topic,
+                start_time=start_time,
+                meeting_type=meeting_type,
+                location=location,
+                max_participants=max_participants,
+            )
+        except meetings.MeetingProviderError as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 502
+
+        group_session = GroupSession(
+            nutritionist_id=nutritionist_id,
+            topic=topic,
+            description=data.get('description'),
+            start_time=start_time,
+            recurrence_rule=recurrence_rule,
+            meeting_type=meeting_type,
+            location=location,
+            meeting_url=details.meeting_url,
+            max_participants=max_participants,
+            meeting_provider_event_id=details.event_id,
+        )
+        session.add(group_session)
+        session.commit()
+        session.refresh(group_session)
+        return jsonify({
+            "message": "Group session created successfully",
+            "group_session_id": group_session.group_session_id,
+            "meeting_url": group_session.meeting_url,
+        }), 201
+    finally:
+        session.close()
+
+
+@bp.route('/group_sessions/<int:group_session_id>/join', methods=['POST'])
+def join_group_session(group_session_id):
+    data = request.get_json() or {}
+    client_id = data.get('client_id')
+    if client_id is None:
+        return jsonify({"error": "client_id is required"}), 400
+
+    session = SessionLocal()
+    try:
+        group_session = session.query(GroupSession).filter(GroupSession.group_session_id == group_session_id).first()
+        if not group_session:
+            return jsonify({"error": "Group session not found"}), 404
+
+        existing = session.query(Appointment).filter(
+            Appointment.group_session_id == group_session_id,
+            Appointment.client_id == client_id,
+            Appointment.status != 'cancelled',
+        ).first()
+        if existing:
+            return jsonify({
+                "message": "Already joined",
+                "appointment_id": existing.appointment_id,
+            })
+
+        active_participants = session.query(Appointment).filter(
+            Appointment.group_session_id == group_session_id,
+            Appointment.status != 'cancelled',
+        ).count()
+        if group_session.max_participants is not None and active_participants >= group_session.max_participants:
+            return jsonify({"error": "Group session is full"}), 409
+
+        try:
+            _consume_quota(session, client_id, group_session.start_time)
+        except SubscriptionNotFoundError as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 400
+        except QuotaExceededError as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 409
+
+        appointment = Appointment(
+            client_id=client_id,
+            nutritionist_id=group_session.nutritionist_id,
+            scheduled_at=group_session.start_time,
+            status='scheduled',
+            meeting_provider_event_id=group_session.meeting_provider_event_id,
+            meeting_url=group_session.meeting_url,
+            location=group_session.location,
+            meeting_type=group_session.meeting_type,
+            max_participants=group_session.max_participants,
+            group_session_id=group_session_id,
+        )
+        session.add(appointment)
+        session.commit()
+        session.refresh(appointment)
+        return jsonify({
+            "message": "Joined group session",
+            "appointment_id": appointment.appointment_id,
+        }), 201
+    finally:
+        session.close()
+
+
+@bp.route('/group_sessions/<int:group_session_id>/withdraw', methods=['DELETE'])
+def withdraw_group_session(group_session_id):
+    data = request.get_json(silent=True) or {}
+    client_id = data.get('client_id')
+    if client_id is None:
+        return jsonify({"error": "client_id is required"}), 400
+
+    session = SessionLocal()
+    try:
+        appointment = session.query(Appointment).filter(
+            Appointment.group_session_id == group_session_id,
+            Appointment.client_id == client_id,
+            Appointment.status != 'cancelled',
+        ).first()
+        if not appointment:
+            return jsonify({"error": "Enrollment not found"}), 404
+
+        appointment.status = 'cancelled'
+
+        subscription = session.query(Subscription).filter(Subscription.user_id == client_id).first()
+        if subscription:
+            _reset_subscription_period(subscription, datetime.utcnow())
+            _release_quota(subscription)
+
+        session.commit()
+        return jsonify({"message": "Withdrawn from group session"})
+    finally:
+        session.close()
+
+# --------------------------------
 # Appointments Endpoints
 # --------------------------------
 @bp.route('/appointments', methods=['POST'])
@@ -170,18 +418,137 @@ def create_appointment():
             scheduled_at = datetime.strptime(data['scheduled_at'], '%Y-%m-%d %H:%M:%S')
         except (KeyError, TypeError, ValueError):
             return jsonify({"error": "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."}), 400
+        meeting_type = data.get('meeting_type', 'virtual')
+        location = data.get('location')
+        raw_max_participants = data.get('max_participants', 1)
+        try:
+            if raw_max_participants is None:
+                max_participants = 1
+            else:
+                max_participants = int(raw_max_participants)
+        except (TypeError, ValueError):
+            return jsonify({"error": "max_participants must be an integer"}), 400
+
+        try:
+            _consume_quota(session, data['client_id'], scheduled_at)
+        except SubscriptionNotFoundError as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 400
+        except QuotaExceededError as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 409
+
+        try:
+            details = meetings.meeting_provider.create_meeting(
+                topic=data.get('topic', 'Nutrition Consultation'),
+                start_time=scheduled_at,
+                meeting_type=meeting_type,
+                location=location,
+                max_participants=max_participants,
+            )
+        except meetings.MeetingProviderError as exc:
+            session.rollback()
+            return jsonify({"error": str(exc)}), 502
 
         new_appointment = Appointment(
             client_id=data['client_id'],
             nutritionist_id=data['nutritionist_id'],
             scheduled_at=scheduled_at,
             status=data.get('status', 'scheduled'),
-            google_calendar_event_id=data.get('google_calendar_event_id')
+            meeting_provider_event_id=details.event_id,
+            meeting_url=details.meeting_url,
+            location=location,
+            meeting_type=meeting_type,
+            max_participants=max_participants,
         )
         session.add(new_appointment)
         session.commit()
         session.refresh(new_appointment)
-        return jsonify({"message": "Appointment created successfully", "appointment_id": new_appointment.appointment_id}), 201
+        return jsonify({
+            "message": "Appointment created successfully",
+            "appointment_id": new_appointment.appointment_id,
+            "meeting_url": new_appointment.meeting_url,
+            "meeting_provider_event_id": new_appointment.meeting_provider_event_id,
+        }), 201
+    finally:
+        session.close()
+
+
+@bp.route('/appointments/<int:appointment_id>', methods=['PATCH'])
+def update_appointment(appointment_id):
+    data = request.get_json() or {}
+    session = SessionLocal()
+    try:
+        appointment = session.query(Appointment).filter(Appointment.appointment_id == appointment_id).first()
+        if not appointment:
+            return jsonify({"error": "Appointment not found"}), 404
+
+        new_time = None
+        if 'scheduled_at' in data:
+            try:
+                new_time = datetime.strptime(data['scheduled_at'], '%Y-%m-%d %H:%M:%S')
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."}), 400
+
+        if new_time and appointment.meeting_provider_event_id:
+            try:
+                details = meetings.meeting_provider.update_meeting(
+                    event_id=appointment.meeting_provider_event_id,
+                    start_time=new_time,
+                )
+                if details.meeting_url:
+                    appointment.meeting_url = details.meeting_url
+            except meetings.MeetingProviderError as exc:
+                session.rollback()
+                return jsonify({"error": str(exc)}), 502
+
+        if new_time:
+            appointment.scheduled_at = new_time
+
+        if 'meeting_type' in data:
+            appointment.meeting_type = data['meeting_type']
+        if 'location' in data:
+            appointment.location = data['location']
+
+        session.commit()
+        session.refresh(appointment)
+        return jsonify({
+            "message": "Appointment updated",
+            "appointment_id": appointment.appointment_id,
+            "scheduled_at": appointment.scheduled_at.isoformat(),
+            "meeting_url": appointment.meeting_url,
+        })
+    finally:
+        session.close()
+
+
+@bp.route('/appointments/<int:appointment_id>', methods=['DELETE'])
+def cancel_appointment(appointment_id):
+    session = SessionLocal()
+    try:
+        appointment = session.query(Appointment).filter(Appointment.appointment_id == appointment_id).first()
+        if not appointment:
+            return jsonify({"error": "Appointment not found"}), 404
+
+        if appointment.status == 'cancelled':
+            return jsonify({"message": "Appointment already cancelled"})
+
+        if appointment.meeting_provider_event_id and appointment.group_session_id is None:
+            try:
+                meetings.meeting_provider.delete_meeting(event_id=appointment.meeting_provider_event_id)
+            except meetings.MeetingProviderError as exc:
+                session.rollback()
+                return jsonify({"error": str(exc)}), 502
+
+        appointment.status = 'cancelled'
+
+        subscription = session.query(Subscription).filter(Subscription.user_id == appointment.client_id).first()
+        if subscription:
+            _reset_subscription_period(subscription, datetime.utcnow())
+            _release_quota(subscription)
+
+        session.commit()
+        return jsonify({"message": "Appointment cancelled"})
     finally:
         session.close()
 
@@ -196,7 +563,12 @@ def get_appointment(appointment_id):
             "nutritionist_id": appointment.nutritionist_id,
             "scheduled_at": appointment.scheduled_at.isoformat(),
             "status": appointment.status,
-            "google_calendar_event_id": appointment.google_calendar_event_id
+            "meeting_provider_event_id": appointment.meeting_provider_event_id,
+            "meeting_url": appointment.meeting_url,
+            "location": appointment.location,
+            "meeting_type": appointment.meeting_type,
+            "max_participants": appointment.max_participants,
+            "group_session_id": appointment.group_session_id,
         }
         session.close()
         return jsonify(result)
@@ -215,7 +587,12 @@ def list_appointments():
             "client_id": appt.client_id,
             "nutritionist_id": appt.nutritionist_id,
             "scheduled_at": appt.scheduled_at.isoformat(),
-            "status": appt.status
+            "status": appt.status,
+            "meeting_provider_event_id": appt.meeting_provider_event_id,
+            "meeting_url": appt.meeting_url,
+            "meeting_type": appt.meeting_type,
+            "location": appt.location,
+            "group_session_id": appt.group_session_id,
         })
     session.close()
     return jsonify(result)
