@@ -234,3 +234,124 @@ def test_create_appointment_with_invalid_datetime_returns_400(base_url):
     )
     assert response.status_code == 400
     assert response.json()["error"] == "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."
+
+
+class _StubAIService:
+    def __init__(self, *, diet: str = "Diet plan", workout: str = "Workout plan", chat: str = "Chat reply") -> None:
+        self._diet = diet
+        self._workout = workout
+        self._chat = chat
+        self.diet_calls = []
+        self.workout_calls = []
+        self.chat_calls = []
+
+    def generate_diet_plan(self, *, user, metrics, goal):
+        self.diet_calls.append({"user": user, "metrics": metrics, "goal": goal})
+        return {"prompt": f"diet prompt for {goal}", "response": self._diet}
+
+    def generate_workout_plan(self, *, user, metrics, goal):
+        self.workout_calls.append({"user": user, "metrics": metrics, "goal": goal})
+        return {"prompt": f"workout prompt for {goal}", "response": self._workout}
+
+    def chat(self, *, user, message, history=None):
+        self.chat_calls.append({"user": user, "message": message, "history": history})
+        return {"prompt": f"chat prompt: {message}", "response": self._chat}
+
+
+def test_ai_diet_plan_generates_and_persists(base_url, monkeypatch):
+    import routes
+    from database import SessionLocal
+    from models import AIInteraction, DietPlan
+
+    stub = _StubAIService(diet="Structured diet plan")
+    monkeypatch.setattr(routes, "ai_service", stub)
+
+    user_id = create_user(base_url, "ai_diet", "ai_diet@example.com", goal="Gain muscle")
+
+    response = requests.post(
+        f"{base_url}/users/{user_id}/ai/diet_plan",
+        json={"goal": "Lose weight", "metrics": {"calories": 2000, "protein": "120g"}},
+    )
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["diet_plan_id"] > 0
+    assert payload["diet_plan"] == "Structured diet plan"
+
+    session = SessionLocal()
+    try:
+        plans = session.query(DietPlan).filter(DietPlan.user_id == user_id).all()
+        assert len(plans) == 1
+        assert plans[0].meal_details == "Structured diet plan"
+
+        interactions = (
+            session.query(AIInteraction)
+            .filter(AIInteraction.user_id == user_id, AIInteraction.interaction_type == "diet_plan")
+            .all()
+        )
+        assert len(interactions) == 1
+        assert interactions[0].prompt == "diet prompt for Lose weight"
+    finally:
+        session.close()
+
+    assert stub.diet_calls, "Diet plan should invoke AI service"
+
+
+def test_ai_chat_can_store_workout_plan(base_url, monkeypatch):
+    import routes
+    from database import SessionLocal
+    from models import AIInteraction, WorkoutPlan
+
+    stub = _StubAIService(chat="Sure, here is a plan", workout="Strength workout")
+    monkeypatch.setattr(routes, "ai_service", stub)
+
+    user_id = create_user(base_url, "ai_chat", "ai_chat@example.com", goal="Stay active")
+
+    response = requests.post(
+        f"{base_url}/users/{user_id}/ai/chat",
+        json={
+            "message": "Can you design a workout?",
+            "generate_workout_plan": True,
+            "workout_goal": "Build strength",
+            "metrics": {"experience": "beginner"},
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["message"] == "Sure, here is a plan"
+    assert payload["workout_plan"] == "Strength workout"
+
+    session = SessionLocal()
+    try:
+        workouts = session.query(WorkoutPlan).filter(WorkoutPlan.user_id == user_id).all()
+        assert len(workouts) == 1
+        assert workouts[0].workout_details == "Strength workout"
+
+        interactions = session.query(AIInteraction).filter(AIInteraction.user_id == user_id).all()
+        assert {interaction.interaction_type for interaction in interactions} == {
+            "chat",
+            "workout_plan",
+        }
+    finally:
+        session.close()
+
+    assert stub.chat_calls, "Chat should be called"
+    assert stub.workout_calls, "Workout generation should be called"
+
+
+def test_ai_diet_plan_handles_service_error(base_url, monkeypatch):
+    import routes
+    from services import AIServiceError
+
+    class FailingAIService(_StubAIService):
+        def generate_diet_plan(self, *, user, metrics, goal):
+            raise AIServiceError("Provider unavailable")
+
+    monkeypatch.setattr(routes, "ai_service", FailingAIService())
+
+    user_id = create_user(base_url, "ai_error", "ai_error@example.com")
+    response = requests.post(
+        f"{base_url}/users/{user_id}/ai/diet_plan",
+        json={"goal": "Lose weight"},
+    )
+    assert response.status_code == 502
+    assert "Provider unavailable" in response.json()["error"]

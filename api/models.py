@@ -27,6 +27,7 @@ class User(Base):
     progress = relationship('UserProgress', back_populates='user')
     diet_plans = relationship('DietPlan', back_populates='user')
     workout_plans = relationship('WorkoutPlan', back_populates='user')
+    ai_interactions = relationship('AIInteraction', back_populates='user')
 
 class UserProgress(Base):
     __tablename__ = 'user_progress'
@@ -88,3 +89,16 @@ class Appointment(Base):
     created_at = Column(DateTime, default=func.now())
     status = Column(String(50), default='scheduled')
     google_calendar_event_id = Column(String(255))
+
+
+class AIInteraction(Base):
+    __tablename__ = 'ai_interactions'
+    interaction_id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    interaction_type = Column(String(50), nullable=False)
+    prompt = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    context = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+
+    user = relationship('User', back_populates='ai_interactions')
