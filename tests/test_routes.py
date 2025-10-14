@@ -1,3 +1,6 @@
+import json
+import hmac
+import hashlib
 import time
 from datetime import datetime, timedelta
 
@@ -50,6 +53,21 @@ def create_user(
     assert "user_id" in data
     return data["user_id"]
 
+
+def create_plan(base_url, name="Starter", price=49.99, **extra):
+    payload = {
+        "name": name,
+        "price": price,
+        "billing_interval": extra.get("billing_interval", "monthly"),
+        "description": extra.get("description", "Test plan"),
+        "allow_one_on_one": extra.get("allow_one_on_one", True),
+        "allow_group_sessions": extra.get("allow_group_sessions", False),
+        "one_on_one_session_limit": extra.get("one_on_one_session_limit", 2),
+        "group_session_limit": extra.get("group_session_limit", 0),
+    }
+    response = requests.post(f"{base_url}/subscriptions/plans", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()["plan_id"]
 
 def login_user(
     base_url: str,
@@ -257,6 +275,17 @@ def test_diet_plan_creation_and_retrieval(base_url, nutritionist_auth):
     assert plan["end_date"].startswith(end_date.isoformat())
 
 
+def test_subscription_plan_listing(base_url):
+    plan_id = create_plan(base_url)
+
+    response = requests.get(f"{base_url}/subscriptions/plans")
+    assert response.status_code == 200
+    plans = response.json()
+    assert any(plan["plan_id"] == plan_id for plan in plans)
+
+
+def test_diet_plan_creation_with_invalid_dates_returns_400(base_url):
+    user_id = create_user(base_url, "dietuser2", "diet2@example.com")
 def test_diet_plan_creation_with_invalid_dates_returns_400(base_url, nutritionist_auth):
     client = create_authenticated_user(
         base_url,
@@ -443,6 +472,147 @@ def test_appointment_workflow(base_url, nutritionist_auth):
     assert not_found.json()["message"] == "Appointment not found"
 
 
+def _webhook_headers(payload: dict[str, object]) -> dict[str, str]:
+    from routes import WEBHOOK_SECRET  # Imported lazily to avoid circular imports
+
+    body = json.dumps(payload)
+    signature = hmac.new(
+        WEBHOOK_SECRET.encode("utf-8"), body.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "X-Signature": signature,
+    }
+
+
+def test_subscription_purchase_and_activation_flow(base_url, monkeypatch):
+    plan_id = create_plan(base_url, name="Premium", price=79.0)
+    user_id = create_user(base_url, "subbuyer", "subbuyer@example.com")
+
+    class DummyClient:
+        def __init__(self):
+            self.created = []
+
+        def create_checkout_session(self, *, plan, user):  # pragma: no cover - exercised in test
+            session_id = "cs_test_checkout"
+            self.created.append((plan.plan_id, user.user_id))
+            return {
+                "id": session_id,
+                "url": f"https://example.test/checkout/{session_id}",
+            }
+
+        def cancel_subscription(self, *, external_subscription_id):  # pragma: no cover - not used here
+            return {"status": "canceled"}
+
+    dummy = DummyClient()
+    monkeypatch.setattr("routes.payment_client", dummy)
+
+    purchase = requests.post(
+        f"{base_url}/users/{user_id}/subscription",
+        json={"plan_id": plan_id},
+    )
+    assert purchase.status_code == 201, purchase.text
+    data = purchase.json()
+    assert data["checkout_session_id"] == "cs_test_checkout"
+    assert data["subscription"]["status"] == "pending"
+
+    webhook_payload = {
+        "type": "checkout.session.completed",
+        "data": {
+            "checkout_session_id": "cs_test_checkout",
+            "external_subscription_id": "sub_123",
+            "external_customer_id": "cus_123",
+            "renewal_date": (datetime.utcnow() + timedelta(days=30)).isoformat(),
+        },
+    }
+
+    webhook_response = requests.post(
+        f"{base_url}/webhooks/payments",
+        data=json.dumps(webhook_payload),
+        headers=_webhook_headers(webhook_payload),
+    )
+    assert webhook_response.status_code == 200, webhook_response.text
+
+    subscription_details = requests.get(f"{base_url}/users/{user_id}/subscription")
+    assert subscription_details.status_code == 200
+    payload = subscription_details.json()
+    assert payload["sub_status"] is True
+    assert payload["subscription"]["status"] == "active"
+    assert payload["subscription"]["external_subscription_id"] == "sub_123"
+
+
+def test_subscription_cancellation_flow(base_url, monkeypatch):
+    plan_id = create_plan(base_url, name="CancelPlan")
+    user_id = create_user(base_url, "canceluser", "cancel@example.com")
+
+    class CancelClient:
+        def __init__(self):
+            self.cancelled = []
+
+        def create_checkout_session(self, *, plan, user):  # pragma: no cover - exercised in test
+            return {
+                "id": "cs_cancel",
+                "url": "https://example.test/checkout/cs_cancel",
+            }
+
+        def cancel_subscription(self, *, external_subscription_id):
+            self.cancelled.append(external_subscription_id)
+            return {"status": "canceled"}
+
+    client = CancelClient()
+    monkeypatch.setattr("routes.payment_client", client)
+
+    purchase = requests.post(
+        f"{base_url}/users/{user_id}/subscription",
+        json={"plan_id": plan_id},
+    )
+    assert purchase.status_code == 201
+
+    # Activate via webhook to set external IDs
+    webhook_payload = {
+        "type": "checkout.session.completed",
+        "data": {
+            "checkout_session_id": "cs_cancel",
+            "external_subscription_id": "sub_cancel",
+            "external_customer_id": "cus_cancel",
+            "renewal_date": (datetime.utcnow() + timedelta(days=30)).isoformat(),
+        },
+    }
+    requests.post(
+        f"{base_url}/webhooks/payments",
+        data=json.dumps(webhook_payload),
+        headers=_webhook_headers(webhook_payload),
+    )
+
+    cancel_response = requests.delete(f"{base_url}/users/{user_id}/subscription")
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["message"] == "Subscription canceled"
+    assert client.cancelled == ["sub_cancel"]
+
+    details = requests.get(f"{base_url}/users/{user_id}/subscription").json()
+    assert details["sub_status"] is False
+    assert details["subscription"]["status"] == "canceled"
+
+
+def test_webhook_signature_verification(base_url):
+    payload = {
+        "type": "checkout.session.completed",
+        "data": {
+            "checkout_session_id": "does-not-exist",
+        },
+    }
+    response = requests.post(
+        f"{base_url}/webhooks/payments",
+        data=json.dumps(payload),
+        headers={"Content-Type": "application/json", "X-Signature": "invalid"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid signature"
+
+
+def test_create_appointment_with_invalid_datetime_returns_400(base_url):
+    client_id = create_user(base_url, "apptclient", "apptclient@example.com")
+    nutritionist_id = create_user(base_url, "apptnut", "apptnut@example.com")
 def test_create_appointment_with_invalid_datetime_returns_400(base_url, nutritionist_auth):
     client = create_authenticated_user(
         base_url,

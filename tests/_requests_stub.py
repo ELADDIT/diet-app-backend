@@ -36,15 +36,20 @@ class Response:
         return json_module.loads(self._body.decode("utf-8"))
 
 
-def _request(method: str, url: str, *, params=None, json=None, headers=None):
+def _request(method: str, url: str, *, params=None, json=None, data=None, headers=None):
     target = _prepare_url(url, params)
-    data = None
-    request_headers = headers.copy() if headers else {}
+    body_data = data
+    header_map = {"Content-Type": "application/json"} if json is not None else {}
     if json is not None:
-        data = json_module.dumps(json).encode("utf-8")
-        request_headers["Content-Type"] = "application/json"
-    request = Request(target, data=data, method=method.upper())
-    for key, value in request_headers.items():
+        body_data = json_module.dumps(json).encode("utf-8")
+    if headers:
+        header_map.update(headers)
+    if body_data is not None and isinstance(body_data, str):
+        body_data = body_data.encode("utf-8")
+    request = Request(target, data=body_data, method=method.upper())
+    for key, value in header_map.items():
+
+
         request.add_header(key, value)
     try:
         with urlopen(request) as response:  # nosec B310 - only used in tests
@@ -61,10 +66,14 @@ def get(url: str, params=None, headers=None):
     return _request("GET", url, params=params, headers=headers)
 
 
-def post(url: str, json=None, headers=None):
-    return _request("POST", url, json=json, headers=headers)
+def post(url: str, json=None, data=None, headers=None):
+    return _request("POST", url, json=json, data=data, headers=headers)
+
+
+def delete(url: str, json=None, data=None, headers=None):
+    return _request("DELETE", url, json=json, data=data, headers=headers)
 
 
 exceptions = SimpleNamespace(ConnectionError=ConnectionError)
 
-__all__ = ["get", "post", "exceptions", "Response", "ConnectionError"]
+__all__ = ["get", "post", "delete", "exceptions", "Response", "ConnectionError"]
