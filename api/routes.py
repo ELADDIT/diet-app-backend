@@ -1,8 +1,70 @@
-from flask import Blueprint, request, jsonify, render_template
+import json
+import os
+import uuid
+import hmac
+import hashlib
 from datetime import datetime
+
+from flask import Blueprint, request, jsonify, render_template
 from werkzeug.security import generate_password_hash
 from database import SessionLocal
-from models import User, UserProgress, DietPlan, WorkoutPlan, Message, Appointment
+from models import (
+    User,
+    UserProgress,
+    DietPlan,
+    WorkoutPlan,
+    Message,
+    Appointment,
+    SubscriptionPlan,
+    UserSubscription,
+)
+
+
+WEBHOOK_SECRET = os.getenv('PAYMENT_WEBHOOK_SECRET', 'test_secret')
+
+
+class PaymentClient:
+    """Very small abstraction over the external payment provider."""
+
+    def create_checkout_session(self, *, plan: SubscriptionPlan, user: User) -> dict:
+        checkout_id = f"cs_{uuid.uuid4().hex}"
+        return {
+            "id": checkout_id,
+            "url": f"https://payments.example.com/checkout/{checkout_id}",
+        }
+
+    def cancel_subscription(self, *, external_subscription_id: str) -> dict:
+        # In a real implementation the external API would be called here.
+        return {"status": "canceled", "external_subscription_id": external_subscription_id}
+
+
+payment_client = PaymentClient()
+
+
+def _verify_signature(raw_payload: bytes, provided_signature: str | None) -> bool:
+    if not provided_signature:
+        return False
+    expected = hmac.new(WEBHOOK_SECRET.encode("utf-8"), raw_payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, provided_signature)
+
+
+def _serialize_subscription(subscription: UserSubscription | None) -> dict | None:
+    if subscription is None:
+        return None
+    return {
+        "subscription_id": subscription.subscription_id,
+        "status": subscription.status,
+        "plan": {
+            "plan_id": subscription.plan.plan_id,
+            "name": subscription.plan.name,
+        } if subscription.plan else None,
+        "checkout_session_id": subscription.checkout_session_id,
+        "external_subscription_id": subscription.external_subscription_id,
+        "external_customer_id": subscription.external_customer_id,
+        "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
+        "activated_at": subscription.activated_at.isoformat() if subscription.activated_at else None,
+        "canceled_at": subscription.canceled_at.isoformat() if subscription.canceled_at else None,
+    }
 
 bp = Blueprint('api', __name__)
 
@@ -70,6 +132,222 @@ def create_user():
     session.refresh(new_user)
     session.close()
     return jsonify({"message": "User created successfully", "user_id": new_user.user_id}), 201
+
+
+# --------------------------------
+# Subscription Plans Endpoints
+# --------------------------------
+@bp.route('/subscriptions/plans', methods=['GET', 'POST'])
+def manage_subscription_plans():
+    session = SessionLocal()
+    try:
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            try:
+                price = data['price']
+                billing_interval = data['billing_interval']
+                name = data['name']
+            except KeyError as exc:  # pragma: no cover - defensive guard
+                return jsonify({"error": f"Missing required field: {exc.args[0]}"}), 400
+
+            plan = SubscriptionPlan(
+                name=name,
+                description=data.get('description'),
+                price=price,
+                billing_interval=billing_interval,
+                one_on_one_session_limit=data.get('one_on_one_session_limit', 0),
+                group_session_limit=data.get('group_session_limit', 0),
+                allow_one_on_one=data.get('allow_one_on_one', False),
+                allow_group_sessions=data.get('allow_group_sessions', False),
+            )
+            session.add(plan)
+            session.commit()
+            session.refresh(plan)
+            return (
+                jsonify(
+                    {
+                        "plan_id": plan.plan_id,
+                        "name": plan.name,
+                        "billing_interval": plan.billing_interval,
+                    }
+                ),
+                201,
+            )
+
+        plans = session.query(SubscriptionPlan).order_by(SubscriptionPlan.plan_id).all()
+        serialized = []
+        for plan in plans:
+            serialized.append(
+                {
+                    "plan_id": plan.plan_id,
+                    "name": plan.name,
+                    "description": plan.description,
+                    "price": float(plan.price),
+                    "billing_interval": plan.billing_interval,
+                    "one_on_one_session_limit": plan.one_on_one_session_limit,
+                    "group_session_limit": plan.group_session_limit,
+                    "allow_one_on_one": plan.allow_one_on_one,
+                    "allow_group_sessions": plan.allow_group_sessions,
+                }
+            )
+        return jsonify(serialized)
+    finally:
+        session.close()
+
+
+# --------------------------------
+# User Subscription Endpoints
+# --------------------------------
+@bp.route('/users/<int:user_id>/subscription', methods=['GET', 'POST', 'DELETE'])
+def manage_user_subscription(user_id: int):
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            return jsonify({"error": "User not found"}), 404
+
+        latest_subscription = (
+            session.query(UserSubscription)
+            .filter(UserSubscription.user_id == user_id)
+            .order_by(UserSubscription.created_at.desc())
+            .first()
+        )
+
+        if request.method == 'GET':
+            return jsonify(
+                {
+                    "user_id": user.user_id,
+                    "sub_status": user.sub_status,
+                    "subscription_expiry": user.subscription_expiry.isoformat()
+                    if user.subscription_expiry
+                    else None,
+                    "subscription": _serialize_subscription(latest_subscription),
+                }
+            )
+
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            plan_id = data.get('plan_id')
+            if plan_id is None:
+                return jsonify({"error": "plan_id is required"}), 400
+
+            plan = session.query(SubscriptionPlan).filter(SubscriptionPlan.plan_id == plan_id).first()
+            if plan is None:
+                return jsonify({"error": "Subscription plan not found"}), 404
+
+            checkout = payment_client.create_checkout_session(plan=plan, user=user)
+
+            subscription = UserSubscription(
+                user_id=user.user_id,
+                plan_id=plan.plan_id,
+                status='pending',
+                checkout_session_id=checkout['id'],
+            )
+            session.add(subscription)
+            session.commit()
+            session.refresh(subscription)
+
+            return (
+                jsonify(
+                    {
+                        "checkout_session_id": checkout['id'],
+                        "checkout_url": checkout['url'],
+                        "subscription": _serialize_subscription(subscription),
+                    }
+                ),
+                201,
+            )
+
+        # DELETE
+        if latest_subscription is None:
+            return jsonify({"error": "No subscription to cancel"}), 404
+
+        if latest_subscription.external_subscription_id:
+            payment_client.cancel_subscription(
+                external_subscription_id=latest_subscription.external_subscription_id
+            )
+
+        latest_subscription.status = 'canceled'
+        latest_subscription.canceled_at = datetime.utcnow()
+        user.sub_status = False
+        user.subscription_expiry = None
+        session.commit()
+
+        return jsonify({"message": "Subscription canceled"})
+    finally:
+        session.close()
+
+
+# --------------------------------
+# Webhook Endpoint
+# --------------------------------
+@bp.route('/webhooks/payments', methods=['POST'])
+def payment_webhook():
+    raw_payload = request.get_data()
+    signature = request.headers.get('X-Signature')
+
+    if not _verify_signature(raw_payload, signature):
+        return jsonify({"error": "Invalid signature"}), 400
+
+    try:
+        event = json.loads(raw_payload.decode('utf-8'))
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid payload"}), 400
+
+    event_type = event.get('type')
+    data = event.get('data', {})
+
+    session = SessionLocal()
+    try:
+        if event_type == 'checkout.session.completed':
+            checkout_id = data.get('checkout_session_id')
+            renewal = data.get('renewal_date')
+            external_subscription_id = data.get('external_subscription_id')
+            external_customer_id = data.get('external_customer_id')
+
+            subscription = (
+                session.query(UserSubscription)
+                .filter(UserSubscription.checkout_session_id == checkout_id)
+                .first()
+            )
+
+            if subscription is None:
+                return jsonify({"error": "Subscription not found"}), 404
+
+            subscription.status = 'active'
+            subscription.external_subscription_id = external_subscription_id
+            subscription.external_customer_id = external_customer_id
+            subscription.activated_at = datetime.utcnow()
+            if renewal:
+                subscription.renewal_date = datetime.fromisoformat(renewal)
+
+            user = session.query(User).filter(User.user_id == subscription.user_id).one()
+            user.sub_status = True
+            user.subscription_expiry = subscription.renewal_date
+            session.commit()
+            return jsonify({"status": "processed"})
+
+        if event_type in {'customer.subscription.deleted', 'subscription.canceled'}:
+            external_subscription_id = data.get('external_subscription_id')
+            subscription = (
+                session.query(UserSubscription)
+                .filter(UserSubscription.external_subscription_id == external_subscription_id)
+                .first()
+            )
+            if subscription is None:
+                return jsonify({"error": "Subscription not found"}), 404
+
+            subscription.status = 'canceled'
+            subscription.canceled_at = datetime.utcnow()
+            user = session.query(User).filter(User.user_id == subscription.user_id).one()
+            user.sub_status = False
+            user.subscription_expiry = None
+            session.commit()
+            return jsonify({"status": "processed"})
+
+        return jsonify({"status": "ignored"})
+    finally:
+        session.close()
 
 # --------------------------------
 # Diet Plans Endpoints
