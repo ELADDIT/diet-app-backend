@@ -12,6 +12,45 @@ try:  # pragma: no cover - exercised when requests is available
 except ModuleNotFoundError:  # pragma: no cover - offline fallback
     from . import _requests_stub as requests
 
+from services import meetings
+from services.meetings import MeetingDetails
+
+
+class StubMeetingProvider:
+    def __init__(self):
+        self.created_payloads = []
+        self.updated_payloads = []
+        self.deleted_event_ids = []
+
+    def create_meeting(self, *, topic, start_time, meeting_type, location, max_participants):
+        event_id = f"evt_{len(self.created_payloads) + 1}"
+        meeting_url = f"https://meetings.test/{event_id}"
+        self.created_payloads.append(
+            {
+                "topic": topic,
+                "start_time": start_time,
+                "meeting_type": meeting_type,
+                "location": location,
+                "max_participants": max_participants,
+            }
+        )
+        return MeetingDetails(meeting_url=meeting_url, event_id=event_id)
+
+    def update_meeting(self, *, event_id, start_time):
+        self.updated_payloads.append({"event_id": event_id, "start_time": start_time})
+        meeting_url = f"https://meetings.test/{event_id}?updated={len(self.updated_payloads)}"
+        return MeetingDetails(meeting_url=meeting_url, event_id=event_id)
+
+    def delete_meeting(self, *, event_id):
+        self.deleted_event_ids.append(event_id)
+
+
+@pytest.fixture(autouse=True)
+def stub_meeting_provider(monkeypatch):
+    stub = StubMeetingProvider()
+    monkeypatch.setattr(meetings, "meeting_provider", stub)
+    return stub
+
 
 DEFAULT_PASSWORD = "strongpassword"
 
@@ -54,6 +93,17 @@ def create_user(
     return data["user_id"]
 
 
+def create_subscription(base_url, user_id, plan_name="Premium", monthly_session_quota=3):
+    response = requests.post(
+        f"{base_url}/subscriptions",
+        json={
+            "user_id": user_id,
+            "plan_name": plan_name,
+            "monthly_session_quota": monthly_session_quota,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["subscription_id"]
 def create_plan(base_url, name="Starter", price=49.99, **extra):
     payload = {
         "name": name,
@@ -437,7 +487,10 @@ def test_appointment_workflow(base_url, nutritionist_auth):
         headers=nutritionist_auth["headers"],
     )
     assert response.status_code == 201
-    appointment_id = response.json()["appointment_id"]
+    data = response.json()
+    appointment_id = data["appointment_id"]
+    assert data["meeting_provider_event_id"] == "evt_1"
+    assert data["meeting_url"].startswith("https://meetings.test/evt_1")
 
     detail_unauthorized = requests.get(f"{base_url}/appointments/{appointment_id}")
     assert detail_unauthorized.status_code == 401
@@ -452,7 +505,9 @@ def test_appointment_workflow(base_url, nutritionist_auth):
     assert appointment["client_id"] == client["user_id"]
     assert appointment["nutritionist_id"] == nutritionist_auth["user_id"]
     assert appointment["status"] == "confirmed"
-    assert appointment["google_calendar_event_id"] == "event123"
+    assert appointment["meeting_provider_event_id"] == "evt_1"
+    assert appointment["meeting_type"] == "virtual"
+    assert appointment["location"] == "Zoom"
     assert appointment["scheduled_at"].startswith(scheduled_at.isoformat())
 
     list_response = requests.get(
@@ -470,6 +525,37 @@ def test_appointment_workflow(base_url, nutritionist_auth):
     )
     assert not_found.status_code == 404
     assert not_found.json()["message"] == "Appointment not found"
+
+    # Reschedule the appointment
+    new_time = scheduled_at + timedelta(hours=1)
+    patch_response = requests.patch(
+        f"{base_url}/appointments/{appointment_id}",
+        json={"scheduled_at": new_time.strftime("%Y-%m-%d %H:%M:%S"), "location": "In person"},
+    )
+    assert patch_response.status_code == 200
+    patched = patch_response.json()
+    assert patched["meeting_url"].startswith("https://meetings.test/evt_1?updated=1")
+
+    # Cancel the appointment
+    cancel_response = requests.delete(f"{base_url}/appointments/{appointment_id}")
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["message"] == "Appointment cancelled"
+
+    # Cancelling again is a no-op
+    second_cancel = requests.delete(f"{base_url}/appointments/{appointment_id}")
+    assert second_cancel.status_code == 200
+    assert second_cancel.json()["message"] == "Appointment already cancelled"
+
+    # After cancellation the quota should be freed, allowing another booking
+    response = requests.post(
+        f"{base_url}/appointments",
+        json={
+            "client_id": client_id,
+            "nutritionist_id": nutritionist_id,
+            "scheduled_at": (scheduled_at + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+    assert response.status_code == 201
 
 
 def _webhook_headers(payload: dict[str, object]) -> dict[str, str]:
@@ -632,3 +718,140 @@ def test_create_appointment_with_invalid_datetime_returns_400(base_url, nutritio
     )
     assert response.status_code == 400
     assert response.json()["error"] == "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."
+
+
+def test_appointment_creation_respects_subscription_quota(base_url):
+    client_id = create_user(base_url, "quota", "quota@example.com")
+    nutritionist_id = create_user(base_url, "coach", "coach@example.com")
+    create_subscription(base_url, client_id, monthly_session_quota=1)
+
+    scheduled_at = datetime.utcnow().replace(microsecond=0)
+    first = requests.post(
+        f"{base_url}/appointments",
+        json={
+            "client_id": client_id,
+            "nutritionist_id": nutritionist_id,
+            "scheduled_at": scheduled_at.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+    assert first.status_code == 201
+
+    second = requests.post(
+        f"{base_url}/appointments",
+        json={
+            "client_id": client_id,
+            "nutritionist_id": nutritionist_id,
+            "scheduled_at": (scheduled_at + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+    assert second.status_code == 409
+    assert second.json()["error"] == "Monthly session quota exceeded"
+
+
+def test_group_session_join_and_withdraw_flow(base_url):
+    client_id = create_user(base_url, "groupie", "groupie@example.com")
+    coach_id = create_user(base_url, "coachgs", "coachgs@example.com")
+    create_subscription(base_url, client_id, monthly_session_quota=2)
+
+    start_time = datetime.utcnow().replace(microsecond=0)
+    response = requests.post(
+        f"{base_url}/group_sessions",
+        json={
+            "nutritionist_id": coach_id,
+            "topic": "Weekly Group Session",
+            "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "max_participants": 5,
+        },
+    )
+    assert response.status_code == 201
+    group_session_id = response.json()["group_session_id"]
+
+    join_response = requests.post(
+        f"{base_url}/group_sessions/{group_session_id}/join",
+        json={"client_id": client_id},
+    )
+    assert join_response.status_code == 201
+    join_data = join_response.json()
+    appointment_id = join_data["appointment_id"]
+
+    # Joining again is a no-op but succeeds
+    repeat_join = requests.post(
+        f"{base_url}/group_sessions/{group_session_id}/join",
+        json={"client_id": client_id},
+    )
+    assert repeat_join.status_code == 200
+    assert repeat_join.json()["message"] == "Already joined"
+
+    withdraw = requests.delete(
+        f"{base_url}/group_sessions/{group_session_id}/withdraw",
+        json={"client_id": client_id},
+    )
+    assert withdraw.status_code == 200
+    assert withdraw.json()["message"] == "Withdrawn from group session"
+
+    # After withdrawing the user can join again
+    rejoin = requests.post(
+        f"{base_url}/group_sessions/{group_session_id}/join",
+        json={"client_id": client_id},
+    )
+    assert rejoin.status_code == 201
+    assert rejoin.json()["appointment_id"] != appointment_id
+
+
+def test_group_session_enforces_capacity_and_quota(base_url):
+    first_client = create_user(base_url, "first", "first@example.com")
+    second_client = create_user(base_url, "second", "second@example.com")
+    coach_id = create_user(base_url, "coachcap", "coachcap@example.com")
+    create_subscription(base_url, first_client, monthly_session_quota=1)
+    create_subscription(base_url, second_client, monthly_session_quota=1)
+
+    start_time = datetime.utcnow().replace(microsecond=0)
+    response = requests.post(
+        f"{base_url}/group_sessions",
+        json={
+            "nutritionist_id": coach_id,
+            "topic": "Limited Group",
+            "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "max_participants": 1,
+        },
+    )
+    assert response.status_code == 201
+    group_session_id = response.json()["group_session_id"]
+
+    join_first = requests.post(
+        f"{base_url}/group_sessions/{group_session_id}/join",
+        json={"client_id": first_client},
+    )
+    assert join_first.status_code == 201
+
+    join_second = requests.post(
+        f"{base_url}/group_sessions/{group_session_id}/join",
+        json={"client_id": second_client},
+    )
+    assert join_second.status_code == 409
+    assert join_second.json()["error"] == "Group session is full"
+
+    # First client has reached the quota; trying to join a second session fails
+    response = requests.post(
+        f"{base_url}/group_sessions/{group_session_id}/join",
+        json={"client_id": first_client},
+    )
+    assert response.status_code == 200  # already joined
+
+    # Attempt to join another group session should fail due to quota
+    response = requests.post(
+        f"{base_url}/group_sessions",
+        json={
+            "nutritionist_id": coach_id,
+            "topic": "Another Group",
+            "start_time": (start_time + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+    assert response.status_code == 201
+    second_session_id = response.json()["group_session_id"]
+    join_again = requests.post(
+        f"{base_url}/group_sessions/{second_session_id}/join",
+        json={"client_id": first_client},
+    )
+    assert join_again.status_code == 409
+    assert join_again.json()["error"] == "Monthly session quota exceeded"

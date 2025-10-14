@@ -74,6 +74,14 @@ def delete(url: str, json=None, data=None, headers=None):
     return _request("DELETE", url, json=json, data=data, headers=headers)
 
 
+def patch(url: str, json=None):
+    return _request("PATCH", url, json=json)
+
+
+def delete(url: str, json=None):
+    return _request("DELETE", url, json=json)
+
+
 exceptions = SimpleNamespace(ConnectionError=ConnectionError)
 
 __all__ = ["get", "post", "delete", "exceptions", "Response", "ConnectionError"]
