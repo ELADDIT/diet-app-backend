@@ -19,6 +19,7 @@ class User(Base):
     username = Column(String(50), unique=True, nullable=False)
     email = Column(String(100), unique=True, nullable=False)
     password_hash = Column(String(200), nullable=False)
+    role = Column(String(20), nullable=False, default='client')
     full_name = Column(String(100))
     gender = Column(String(10))
     age = Column(Integer)
@@ -37,7 +38,7 @@ class User(Base):
     progress = relationship('UserProgress', back_populates='user')
     diet_plans = relationship('DietPlan', back_populates='user')
     workout_plans = relationship('WorkoutPlan', back_populates='user')
-    subscription = relationship('Subscription', back_populates='user', uselist=False)
+    subscriptions = relationship('UserSubscription', back_populates='user', cascade='all, delete-orphan')
 
 class UserProgress(Base):
     __tablename__ = 'user_progress'
@@ -140,3 +141,42 @@ class Subscription(Base):
     period_start = Column(DateTime, default=func.now())
 
     user = relationship('User', back_populates='subscription')
+    google_calendar_event_id = Column(String(255))
+
+
+class SubscriptionPlan(Base):
+    __tablename__ = 'subscription_plans'
+
+    plan_id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    description = Column(Text)
+    price = Column(DECIMAL(8, 2), nullable=False)
+    billing_interval = Column(String(50), nullable=False)
+    one_on_one_session_limit = Column(Integer, default=0)
+    group_session_limit = Column(Integer, default=0)
+    allow_one_on_one = Column(Boolean, default=False)
+    allow_group_sessions = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    subscriptions = relationship('UserSubscription', back_populates='plan', cascade='all, delete-orphan')
+
+
+class UserSubscription(Base):
+    __tablename__ = 'user_subscriptions'
+
+    subscription_id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    plan_id = Column(Integer, ForeignKey('subscription_plans.plan_id'), nullable=False)
+    status = Column(String(50), default='pending', nullable=False)
+    checkout_session_id = Column(String(255), unique=True)
+    external_customer_id = Column(String(255))
+    external_subscription_id = Column(String(255))
+    renewal_date = Column(DateTime)
+    activated_at = Column(DateTime)
+    canceled_at = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    user = relationship('User', back_populates='subscriptions')
+    plan = relationship('SubscriptionPlan', back_populates='subscriptions')
