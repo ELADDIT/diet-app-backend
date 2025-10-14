@@ -65,6 +65,10 @@ def post(url: str, json=None):
     return _request("POST", url, json=json)
 
 
+def patch(url: str, json=None):
+    return _request("PATCH", url, json=json)
+
+
 exceptions = SimpleNamespace(ConnectionError=ConnectionError)
 
-__all__ = ["get", "post", "exceptions", "Response", "ConnectionError"]
+__all__ = ["get", "post", "patch", "exceptions", "Response", "ConnectionError"]

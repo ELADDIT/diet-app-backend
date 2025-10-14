@@ -1,6 +1,7 @@
 import time
 from datetime import datetime, timedelta
 
+import pytest
 from werkzeug.security import generate_password_hash
 
 try:  # pragma: no cover - exercised when requests is available
@@ -144,6 +145,99 @@ def test_diet_plan_creation_with_invalid_dates_returns_400(base_url):
     )
     assert response.status_code == 400
     assert response.json()["error"] == "Invalid date format. Expected YYYY-MM-DD."
+
+
+def test_progress_entry_creation_and_history(base_url):
+    user_id = create_user(base_url, "progressuser", "progress@example.com")
+
+    recorded_at = datetime.utcnow().replace(microsecond=0)
+    payload = {
+        "recorded_at": recorded_at.isoformat(),
+        "weight": 180,
+        "weight_unit": "lb",
+        "neck_circumference": 16,
+        "circumference_unit": "in",
+        "body_fat_percentage": 18.5,
+        "notes": "Felt energized",
+    }
+
+    response = requests.post(f"{base_url}/users/{user_id}/progress", json=payload)
+    assert response.status_code == 201
+    created = response.json()["progress"]
+    assert created["progress_id"] > 0
+    assert created["units"] == {"weight": "kg", "circumference": "cm"}
+    assert created["recorded_at"].startswith(recorded_at.isoformat())
+    assert created["weight"] == pytest.approx(81.6466, rel=1e-3)
+    assert created["neck_circumference"] == pytest.approx(40.64, rel=1e-3)
+    assert created["body_fat_percentage"] == pytest.approx(18.5)
+
+    history_response = requests.get(f"{base_url}/users/{user_id}/progress")
+    assert history_response.status_code == 200
+    history = history_response.json()
+    assert len(history) == 1
+    history_entry = history[0]
+    assert history_entry["progress_id"] == created["progress_id"]
+    assert history_entry["units"] == {"weight": "kg", "circumference": "cm"}
+    assert history_entry["weight"] == pytest.approx(created["weight"], rel=1e-9)
+
+
+def test_progress_entry_rejects_invalid_units(base_url):
+    user_id = create_user(base_url, "invalidunits", "invalidunits@example.com")
+
+    response = requests.post(
+        f"{base_url}/users/{user_id}/progress",
+        json={
+            "weight": 70,
+            "weight_unit": "stone",
+        },
+    )
+    assert response.status_code == 400
+    assert "Invalid weight_unit" in response.json()["error"]
+
+
+def test_workout_plan_creation_and_update(base_url):
+    user_id = create_user(base_url, "workoutuser", "workout@example.com")
+
+    start_date = datetime.utcnow().date()
+    end_date = start_date + timedelta(days=14)
+    response = requests.post(
+        f"{base_url}/users/{user_id}/workout_plans",
+        json={
+            "trainer_id": 7,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "workout_details": "Strength training 3x per week",
+            "notes": "Focus on recovery",
+        },
+    )
+    assert response.status_code == 201
+    created_plan = response.json()["workout_plan"]
+    workout_id = created_plan["workout_id"]
+
+    list_response = requests.get(f"{base_url}/users/{user_id}/workout_plans")
+    assert list_response.status_code == 200
+    plans = list_response.json()
+    assert len(plans) == 1
+    assert plans[0]["workout_id"] == workout_id
+
+    updated_end = end_date + timedelta(days=7)
+    patch_response = requests.patch(
+        f"{base_url}/users/{user_id}/workout_plans",
+        json={
+            "workout_id": workout_id,
+            "end_date": updated_end.isoformat(),
+            "notes": "Add light cardio warm-ups",
+        },
+    )
+    assert patch_response.status_code == 200
+    updated_plan = patch_response.json()["workout_plan"]
+    assert updated_plan["notes"] == "Add light cardio warm-ups"
+    assert updated_plan["end_date"].startswith(updated_end.isoformat())
+
+    refreshed_list = requests.get(f"{base_url}/users/{user_id}/workout_plans")
+    assert refreshed_list.status_code == 200
+    refreshed_plan = refreshed_list.json()[0]
+    assert refreshed_plan["notes"] == "Add light cardio warm-ups"
 
 
 def test_message_conversation_flow(base_url):
