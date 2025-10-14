@@ -48,6 +48,8 @@ def _request(method: str, url: str, *, params=None, json=None, data=None, header
         body_data = body_data.encode("utf-8")
     request = Request(target, data=body_data, method=method.upper())
     for key, value in header_map.items():
+
+
         request.add_header(key, value)
     try:
         with urlopen(request) as response:  # nosec B310 - only used in tests
@@ -60,8 +62,8 @@ def _request(method: str, url: str, *, params=None, json=None, data=None, header
         raise ConnectionError(str(exc)) from exc
 
 
-def get(url: str, params=None):
-    return _request("GET", url, params=params)
+def get(url: str, params=None, headers=None):
+    return _request("GET", url, params=params, headers=headers)
 
 
 def post(url: str, json=None, data=None, headers=None):
