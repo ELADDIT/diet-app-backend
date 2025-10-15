@@ -1,0 +1,33 @@
+{
+  "name": "web",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "lint": "next lint",
+    "test": "vitest",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@diet/theme": "workspace:*",
+    "@diet/ui": "workspace:*",
+    "@expo/next-adapter": "^5.0.0",
+    "framer-motion": "^11.0.0",
+    "next": "14.2.3",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.24",
+    "@types/react": "18.2.21",
+    "@types/react-dom": "18.2.7",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^8.56.0",
+    "eslint-config-next": "14.2.3",
+    "postcss": "^8.4.33",
+    "tailwindcss": "^3.4.3",
+    "typescript": "^5.3.3",
+    "vitest": "^1.4.0"
+  }
+}
