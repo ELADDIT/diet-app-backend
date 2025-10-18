@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "allowJs": true,
+    "moduleResolution": "Bundler",
+    "types": ["node"]
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "../../packages/ui/src/**/*.ts", "../../packages/ui/src/**/*.tsx"],
+  "exclude": ["node_modules"]
+}

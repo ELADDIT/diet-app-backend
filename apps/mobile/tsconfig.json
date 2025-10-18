@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-native",
+    "types": ["nativewind/types", "expo-router/types"]
+  },
+  "include": ["app", "expo-env.d.ts"],
+  "exclude": ["node_modules"]
+}
