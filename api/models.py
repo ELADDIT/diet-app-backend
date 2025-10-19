@@ -39,6 +39,7 @@ class User(Base):
     diet_plans = relationship('DietPlan', back_populates='user')
     workout_plans = relationship('WorkoutPlan', back_populates='user')
     ai_interactions = relationship('AIInteraction', back_populates='user')
+    subscription = relationship('Subscription', back_populates='user', uselist=False)
     subscriptions = relationship('UserSubscription', back_populates='user', cascade='all, delete-orphan')
 
 class UserProgress(Base):

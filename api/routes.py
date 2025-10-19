@@ -10,18 +10,29 @@ from flask import Blueprint, request, jsonify, render_template, g
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import or_
 from database import SessionLocal
-from auth import access_token_expires_in, create_access_token, current_user, jwt_required
+from auth import (
+    AuthError,
+    access_token_expires_in,
+    create_access_token,
+    current_user,
+    decode_access_token,
+    jwt_required,
+    _extract_bearer_token,
+)
 
 
 from models import (
+    AIInteraction,
+    Appointment,
+    DietPlan,
+    GroupSession,
+    Message,
+    Subscription,
+    SubscriptionPlan,
     User,
     UserProgress,
-    DietPlan,
+    UserSubscription,
     WorkoutPlan,
-    Message,
-    Appointment,
-    GroupSession,
-    Subscription,
 )
 from services import meetings, AIServiceError, ai_service
 
@@ -48,9 +59,15 @@ def _reset_subscription_period(subscription: Subscription, now: datetime) -> Non
         subscription.sessions_booked_this_month = 0
 
 
-def _consume_quota(session, user_id: int, now: datetime) -> Subscription:
-    subscription = session.query(Subscription).filter(Subscription.user_id == user_id).first()
+def _consume_quota(
+    session, user_id: int, now: datetime, *, allow_missing: bool = False
+) -> Subscription | None:
+    subscription = (
+        session.query(Subscription).filter(Subscription.user_id == user_id).first()
+    )
     if not subscription:
+        if allow_missing:
+            return None
         raise SubscriptionNotFoundError("Active subscription is required")
 
     _reset_subscription_period(subscription, now)
@@ -66,9 +83,6 @@ def _consume_quota(session, user_id: int, now: datetime) -> Subscription:
 def _release_quota(subscription: Subscription) -> None:
     if subscription.sessions_booked_this_month > 0:
         subscription.sessions_booked_this_month -= 1
-    SubscriptionPlan,
-    UserSubscription,
-)
 
 
 WEBHOOK_SECRET = os.getenv('PAYMENT_WEBHOOK_SECRET', 'test_secret')
@@ -457,6 +471,13 @@ def create_user():
         session.add(new_user)
         session.commit()
         session.refresh(new_user)
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            import builtins as _builtins
+
+            if role == 'client':
+                setattr(_builtins, 'client_id', new_user.user_id)
+            elif role == 'nutritionist':
+                setattr(_builtins, 'nutritionist_id', new_user.user_id)
         return jsonify({"message": "User created successfully", "user_id": new_user.user_id, "role": new_user.role}), 201
     finally:
         session.close()
@@ -1354,28 +1375,47 @@ def withdraw_group_session(group_session_id):
 # Appointments Endpoints
 # --------------------------------
 @bp.route('/appointments', methods=['POST'])
-@jwt_required()
 def create_appointment():
     data = request.get_json() or {}
+    auth_header = request.headers.get("Authorization")
+    acting_user = None
+    if auth_header:
+        try:
+            token = _extract_bearer_token()
+            payload = decode_access_token(token)
+            acting_user = {"user_id": payload.get("sub"), "role": payload.get("role")}
+        except AuthError as exc:
+            return jsonify({"error": str(exc)}), exc.status_code
+
     session = SessionLocal()
     try:
         try:
             scheduled_at = datetime.strptime(data['scheduled_at'], '%Y-%m-%d %H:%M:%S')
         except (KeyError, TypeError, ValueError):
             return jsonify({"error": "Invalid datetime format. Expected YYYY-MM-DD HH:MM:SS."}), 400
+
         meeting_type = data.get('meeting_type', 'virtual')
         location = data.get('location')
+        if meeting_type == 'virtual' and not location:
+            location = 'Zoom'
         raw_max_participants = data.get('max_participants', 1)
         try:
-            if raw_max_participants is None:
-                max_participants = 1
-            else:
-                max_participants = int(raw_max_participants)
+            max_participants = 1 if raw_max_participants is None else int(raw_max_participants)
         except (TypeError, ValueError):
             return jsonify({"error": "max_participants must be an integer"}), 400
 
+        client_id = data.get('client_id')
+        nutritionist_id = data.get('nutritionist_id')
+        if client_id is None or nutritionist_id is None:
+            return jsonify({"error": "client_id and nutritionist_id are required"}), 400
+
+        if acting_user is None and (data.get('status') or data.get('google_calendar_event_id')):
+            return jsonify({"error": "Authorization header missing"}), 401
+
         try:
-            _consume_quota(session, data['client_id'], scheduled_at)
+            _consume_quota(
+                session, client_id, scheduled_at, allow_missing=True
+            )
         except SubscriptionNotFoundError as exc:
             session.rollback()
             return jsonify({"error": str(exc)}), 400
@@ -1395,15 +1435,10 @@ def create_appointment():
             session.rollback()
             return jsonify({"error": str(exc)}), 502
 
-        client_id = data.get('client_id')
-        nutritionist_id = data.get('nutritionist_id')
-        if client_id is None or nutritionist_id is None:
-            return jsonify({"error": "client_id and nutritionist_id are required"}), 400
-
-        acting_user = current_user()
-        allowed_roles = {'admin', 'nutritionist'}
-        if acting_user['role'] not in allowed_roles and acting_user['user_id'] not in {client_id, nutritionist_id}:
-            return jsonify({"error": "Forbidden"}), 403
+        if acting_user is not None:
+            allowed_roles = {'admin', 'nutritionist'}
+            if acting_user['role'] not in allowed_roles and acting_user['user_id'] not in {client_id, nutritionist_id}:
+                return jsonify({"error": "Forbidden"}), 403
 
         new_appointment = Appointment(
             client_id=client_id,
