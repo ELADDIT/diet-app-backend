@@ -6,8 +6,7 @@
     "declaration": true,
     "emitDeclarationOnly": true,
     "noEmit": false,
-    "jsx": "react-jsx",
-    "types": ["react", "react-native"]
+    "jsx": "react-jsx"
   },
   "include": ["src"]
 }
