@@ -6,8 +6,7 @@
     "declaration": true,
     "emitDeclarationOnly": true,
     "noEmit": false,
-    "jsx": "react-jsx",
-    "typeRoots": ["./types", "../../node_modules/@types"]
+    "jsx": "react-jsx"
   },
-  "include": ["src", "types"]
+  "include": ["src"]
 }

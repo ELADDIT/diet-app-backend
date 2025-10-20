@@ -7,8 +7,12 @@ settings:
 importers:
   .:
     specifiers:
+      '@types/react': 18.2.21
+      '@types/react-dom': 18.2.7
       turbo: ^1.13.4
     devDependencies:
+      '@types/react': 18.2.21
+      '@types/react-dom': 18.2.7
       turbo: ^1.13.4
 
   apps/mobile:
