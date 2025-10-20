@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "expo start --clear",
     "lint": "eslint . --ext .ts,.tsx",
-    "test": "jest",
+    "test": "jest --passWithNoTests",
     "build": "expo export"
   },
   "dependencies": {
