@@ -119,11 +119,14 @@ importers:
   packages/ui:
     specifiers:
       '@diet/theme': workspace:*
+      '@types/react': 18.2.21
       'expo-linear-gradient': ^12.7.2
       'framer-motion': ^11.0.0
     dependencies:
       '@diet/theme': workspace:*
       expo-linear-gradient: ^12.7.2
       framer-motion: ^11.0.0
+    devDependencies:
+      '@types/react': 18.2.21
 
 packages: {}
