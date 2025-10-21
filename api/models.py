@@ -40,6 +40,7 @@ class User(Base):
     workout_plans = relationship('WorkoutPlan', back_populates='user')
     ai_interactions = relationship('AIInteraction', back_populates='user')
     subscriptions = relationship('UserSubscription', back_populates='user', cascade='all, delete-orphan')
+    subscription = relationship('Subscription', back_populates='user', uselist=False, cascade='all, delete-orphan')
 
 class UserProgress(Base):
     __tablename__ = 'user_progress'

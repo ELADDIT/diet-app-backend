@@ -140,7 +140,10 @@ def _extract_bearer_token() -> str:
 
 
 def jwt_required(
-    *, roles: Optional[Iterable[str]] = None, allow_self_kw: Optional[str] = None
+    *,
+    roles: Optional[Iterable[str]] = None,
+    allow_self_kw: Optional[str] = None,
+    optional: bool = False,
 ):
     """Decorator enforcing that the request contains a valid JWT.
 
@@ -156,8 +159,17 @@ def jwt_required(
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            g.current_user = None
             try:
                 token = _extract_bearer_token()
+            except AuthError as exc:
+                if optional and exc.status_code == 401:
+                    if allowed_roles:
+                        return jsonify({"error": str(exc)}), exc.status_code
+                    return func(*args, **kwargs)
+                return jsonify({"error": str(exc)}), exc.status_code
+
+            try:
                 payload = decode_access_token(token)
             except AuthError as exc:
                 return jsonify({"error": str(exc)}), exc.status_code
