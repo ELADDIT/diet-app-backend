@@ -17,5 +17,8 @@
     "@diet/theme": "workspace:*",
     "framer-motion": "^11.0.0",
     "expo-linear-gradient": "^12.7.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.21"
   }
 }
