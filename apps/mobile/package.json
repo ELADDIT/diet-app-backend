@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "expo start --clear",
     "lint": "eslint . --ext .ts,.tsx",
-    "test": "jest",
+    "test": "jest --passWithNoTests",
     "build": "expo export"
   },
   "dependencies": {
@@ -32,6 +32,7 @@
     "@types/react": "18.2.21",
     "@types/react-native": "0.73.0",
     "@types/react-test-renderer": "18.0.0",
+    "eslint-config-expo": "workspace:*",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-react": "^7.34.1",
     "eslint-plugin-react-hooks": "^4.6.0",
